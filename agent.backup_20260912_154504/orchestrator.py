@@ -4,7 +4,6 @@ from pathlib import Path
 import json
 import sys
 
-from agent.global_engine.solver import GlobalSolver
 from agent.classifier import classify
 from agent.context import ChallengeContext, discover_files
 from agent.module_adapter import execute
@@ -25,14 +24,13 @@ MODULES = {
         "agent.hypothesis",
     ],
 
-	"pwn": [
-	"agent.scanner",
-	"agent.detector",
-	"agent.hypothesis",
-	"agent.pwn_engine",
-	],
+    "pwn": [
+        "agent.scanner",
+        "agent.detector",
+        "agent.hypothesis",
+    ],
 
-	 "reverse": [
+    "reverse": [
         "agent.scanner",
         "agent.detector",
         "agent.hypothesis",
@@ -303,75 +301,6 @@ def run_hypothesis_engine(context):
 
     return hypotheses
 
-# ============================================================
-# GLOBAL SOLVER
-# ============================================================
-
-def run_global_solver(context):
-    """
-    Lance le moteur global CyberAI.
-
-    Le GlobalSolver est le contrôleur de haut niveau :
-    - priorisation des hypothèses
-    - boucle de résolution
-    - apprentissage depuis les observations
-    - préparation des étapes suivantes
-
-    IMPORTANT :
-    une confiance élevée n'est jamais considérée comme
-    une validation d'exploitation.
-    """
-
-    print()
-    print("╔══════════════════════════════════════════╗")
-    print("║           GLOBAL SOLVER                  ║")
-    print("╚══════════════════════════════════════════╝")
-    print()
-
-    try:
-        solver = GlobalSolver(context)
-
-        result = solver.run()
-
-        if result is None:
-            result = {}
-
-        if isinstance(result, dict):
-            context.metadata["global_solver"] = result
-
-            prioritized = result.get("prioritized_hypotheses")
-
-            if isinstance(prioritized, list):
-                context.metadata["prioritized_hypotheses"] = prioritized
-
-            status = result.get("status")
-
-            if status:
-                context.metadata["solver_status"] = status
-
-            print("[+] GlobalSolver exécuté.")
-
-        else:
-            context.metadata["global_solver"] = {
-                "result": result
-            }
-
-            print("[+] GlobalSolver exécuté.")
-
-        return result
-
-    except Exception as exc:
-        print(f"[!] GlobalSolver ERROR: {exc}")
-
-        context.add_error(
-            "global_solver",
-            str(exc)
-        )
-
-        return {
-            "status": "ERROR",
-            "error": str(exc)
-        }
 
 # ============================================================
 # EXPERIMENT ENGINE
@@ -704,114 +633,21 @@ def save_context(context):
 
 def print_final_report(context):
 
+    summary = context.summary()
+
     print()
     print("╔══════════════════════════════════════════╗")
-    print("║            FINAL REPORT                  ║")
+    print("║            FINAL CONTEXT                 ║")
     print("╚══════════════════════════════════════════╝")
+
     print()
 
-    # --- Infos générales ---
-    print(f"Challenge      : {context.challenge}")
-    print(f"Category       : {context.category}")
-    print(f"Files          : {len(context.files)}")
-    print()
+    for key, value in summary.items():
 
-    # --- Résultats PwnEngine s'ils existent ---
-    pwn_result = None
-    for name, result in context.module_results.items():
-        if "pwn_engine" in name and isinstance(result, dict):
-            inner = result.get("result")
-            if isinstance(inner, dict):
-                pwn_result = inner
-                break
+        print(
+            f"{key:15} : {value}"
+        )
 
-    if pwn_result:
-        print("── PwnEngine Analysis ─────────────────────")
-        binaries = pwn_result.get("binaries", [])
-        sources = pwn_result.get("sources", [])
-        protections = pwn_result.get("protections", {})
-        primitives = pwn_result.get("primitives", [])
-        symbols = pwn_result.get("symbols", [])
-        strings = pwn_result.get("strings", [])
-        targets = pwn_result.get("targets", [])
-
-        if binaries:
-            print(f"Binaries       : {len(binaries)}")
-            for b in binaries:
-                print(f"  • {b}")
-
-        if sources:
-            print(f"Sources        : {len(sources)}")
-            for s in sources:
-                print(f"  • {s}")
-
-        if protections:
-            print("Protections    :")
-            for binary, info in protections.items():
-                print(f"  [{binary}]")
-                for line in str(info).splitlines():
-                    print(f"    {line}")
-
-        if primitives:
-            print(f"Primitives     : {len(primitives)}")
-            for p in primitives:
-                if isinstance(p, dict):
-                    print(f"  • {p.get('type', '?')} ({p.get('name', p.get('source', ''))})")
-
-        if symbols:
-            print(f"Interesting symbols : {len(symbols)}")
-            for s in symbols[:10]:
-                if isinstance(s, dict):
-                    print(f"  • {s.get('name')} @ {s.get('address')}")
-
-        if targets:
-            print(f"Targets        : {len(targets)}")
-            for t in targets:
-                if isinstance(t, dict):
-                    print(f"  • {t.get('type')} → {t.get('variable', t.get('source', ''))}")
-
-        if strings:
-            print(f"Interesting strings : {len(strings)}")
-            for s in strings[:8]:
-                if isinstance(s, dict):
-                    print(f"  • {s.get('value')}")
-        print()
-
-    # --- Hypothèses ---
-    print("── Hypotheses ─────────────────────────────")
-    if not context.hypotheses:
-        print("  (aucune)")
-    else:
-        for h in context.hypotheses:
-            if isinstance(h, dict):
-                conf = h.get("confidence", h.get("solver_score", "?"))
-                name = h.get("name", "unknown")
-                reason = h.get("reason", "")
-                print(f"  [{conf}%] {name}")
-                if reason:
-                    print(f"       {reason}")
-    print()
-
-    # --- Flags ---
-    print("── Flags ──────────────────────────────────")
-    if context.flags:
-        for f in context.flags:
-            print(f"  🚩 {f}")
-    else:
-        print("  (aucun flag détecté)")
-    print()
-
-    # --- Erreurs ---
-    if context.errors:
-        print("── Errors ─────────────────────────────────")
-        for e in context.errors:
-            if isinstance(e, dict):
-                print(f"  • {e.get('module')}: {e.get('error')}")
-            else:
-                print(f"  • {e}")
-        print()
-
-    print("════════════════════════════════════════════")
 
 # ============================================================
 # MAIN ENGINE
@@ -951,21 +787,6 @@ def run(challenge):
     # --------------------------------------------------------
     # EXPERIMENT
     # --------------------------------------------------------
-
-    # --------------------------------------------------------
-    # GLOBAL SOLVER
-    # --------------------------------------------------------
-
-    context.metadata["engine"] = "CyberAI Global Solver"
-    context.metadata["engine_version"] = "V4"
-    context.metadata["autonomous"] = True
-    context.metadata["validation_required"] = True
-
-    solver_result = run_global_solver(
-        context
-    )
-
-    context.metadata["solver_result"] = solver_result
 
     experiments = run_experiment_engine(
         context

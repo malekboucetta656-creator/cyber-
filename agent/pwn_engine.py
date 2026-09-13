@@ -572,3 +572,21 @@ if __name__ == "__main__":
             ensure_ascii=False,
         )
     )
+
+def analyze(challenge):
+    """
+    Point d'entrée compatible avec module_adapter.
+    """
+    engine = PwnEngine(challenge)
+    engine.discover()
+
+    for binary in engine.result.get("binaries", []):
+        engine.checksec(binary)
+        engine.analyze_symbols(binary)
+        engine.analyze_strings(binary)
+
+    for source in engine.result.get("sources", []):
+        engine.analyze_source(source)
+
+    engine.generate_hypotheses()
+    return engine.result

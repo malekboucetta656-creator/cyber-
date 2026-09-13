@@ -1,44 +1,13 @@
-# Python
 __pycache__/
 *.py[cod]
+*.egg-info/
 .venv/
 venv/
-env/
-
-# Secrets
 .env
-.env.*
-!.env.example
-*.key
-*.pem
-*.token
-credentials.json
-
-# Logs
-logs/
 *.log
-
-# Backups locaux
-backup*/
-agent.backup_*/
-
-# Runtime / cache
-.cache/
-*.sqlite
-*.db
-
-# Ollama / modèles
-models/
-*.gguf
-
-# OS / IDE
-.vscode/
-.idea/
+.cyberai/
+workspace/**/.cyberai/
+*.o
+*.bin
+*.out
 .DS_Store
-
-# Temporary
-tmp/
-temp/
-*.tmp
-*.bak
-*.bak

@@ -379,68 +379,19 @@ def run_global_solver(context):
 
 def run_experiment_engine(context):
     """
-    Moteur d'expérimentation.
-
-    Pour l'instant cette étape ne valide pas artificiellement
-    les hypothèses.
-
-    Une hypothèse doit être validée par une expérience
-    reproductible avec une observation concrète.
+    Lance ExperimentEngine v0.3
     """
+    try:
+        from agent.experiment_engine import ExperimentEngine
 
-    print()
-    print("╔══════════════════════════════════════════╗")
-    print("║          EXPERIMENT ENGINE               ║")
-    print("╚══════════════════════════════════════════╝")
+        engine = ExperimentEngine(context)
+        results = engine.run()
+        return results
 
-    print()
-
-    if not context.hypotheses:
-
-        print(
-            "[-] Aucune hypothèse à tester."
-        )
-
+    except Exception as exc:
+        print(f"[!] ExperimentEngine ERROR: {exc}")
+        context.add_error("experiment_engine", str(exc))
         return []
-
-    print(
-        f"[+] {len(context.hypotheses)} "
-        f"hypothèse(s) à tester."
-    )
-
-    print()
-
-    for hypothesis in context.hypotheses:
-
-        name = hypothesis.get(
-            "name",
-            "unknown"
-        )
-
-        confidence = hypothesis.get(
-            "confidence",
-            0
-        )
-
-        print(
-            f"[?] {name} "
-            f"({confidence}%)"
-        )
-
-    print()
-
-    print(
-        "[!] Aucun test automatique "
-        "n'est encore marqué comme validé."
-    )
-
-    print(
-        "[!] Validation expérimentale "
-        "à implémenter."
-    )
-
-    return []
-
 
 # ============================================================
 # EXPLOIT ENGINE

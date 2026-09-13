@@ -1,480 +1,273 @@
 #!/usr/bin/env python3
+"""
+ExperimentEngine v0.3 - version minimale
+Objectif : tester des hypothèses pwn de base et chercher un flag.
+"""
 
-import json
-import os
+from __future__ import annotations
+
 import re
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
+
+
+FLAG_PATTERNS = [
+    re.compile(r"FLAG\{[^\}]+\}", re.IGNORECASE),
+    re.compile(r"flag\{[^\}]+\}", re.IGNORECASE),
+    re.compile(r"CTF\{[^\}]+\}", re.IGNORECASE),
+    re.compile(r"HTB\{[^\}]+\}", re.IGNORECASE),
+]
 
 
 class ExperimentEngine:
-    """
-    Moteur expérimental CyberAI.
+    def __init__(self, context):
+        self.context = context
+        self.experiments: list[dict[str, Any]] = []
 
-    Une hypothèse n'est jamais considérée comme valide
-    uniquement parce qu'elle possède un score élevé.
+    # ---------------------------------------------------------
+    # Utilitaires
+    # ---------------------------------------------------------
 
-    Elle doit produire une observation réelle.
-    """
+    def _find_binaries(self) -> list[Path]:
+        binaries = []
+        challenge = Path(self.context.challenge)
 
-    def __init__(self, challenge):
-        self.challenge = os.path.abspath(challenge)
-        self.results = []
+        # Depuis les résultats PwnEngine
+        for name, result in self.context.module_results.items():
+            if "pwn_engine" not in name:
+                continue
+            inner = result.get("result") if isinstance(result, dict) else None
+            if not isinstance(inner, dict):
+                continue
+            for b in inner.get("binaries", []):
+                p = Path(b)
+                if p.exists() and p.is_file():
+                    binaries.append(p)
 
-    def make_experiment(self, hypothesis):
-        name = hypothesis.get("name", "Unknown")
-        confidence = hypothesis.get("confidence", 0)
+        # Fallback : chercher des ELF dans le challenge
+        if not binaries and challenge.exists():
+            for p in challenge.rglob("*"):
+                if p.is_file() and not p.name.endswith((".c", ".h", ".txt", ".md")):
+                    try:
+                        with p.open("rb") as f:
+                            if f.read(4) == b"\x7fELF":
+                                binaries.append(p)
+                    except Exception:
+                        pass
 
-        return {
-            "id": f"exp-{len(self.results) + 1:03d}",
-            "hypothesis": name,
-            "confidence": confidence,
-            "status": "PENDING",
+        return binaries
+
+    def _search_flag(self, text: str) -> str | None:
+        if not text:
+            return None
+        for pattern in FLAG_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                return match.group(0)
+        return None
+
+    def _run_binary(self, binary: Path, data: bytes, timeout: float = 1.5) -> dict:
+        try:
+            proc = subprocess.run(
+                [str(binary)],
+                input=data,
+                capture_output=True,
+                timeout=timeout,
+            )
+            stdout = proc.stdout.decode("utf-8", errors="replace")
+            stderr = proc.stderr.decode("utf-8", errors="replace")
+            return {
+                "ok": True,
+                "returncode": proc.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "crashed": proc.returncode < 0,
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "returncode": None,
+                "stdout": "",
+                "stderr": "timeout",
+                "crashed": False,
+                "error": "timeout",
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "returncode": None,
+                "stdout": "",
+                "stderr": str(exc),
+                "crashed": False,
+                "error": str(exc),
+            }
+
+    # ---------------------------------------------------------
+    # Expériences
+    # ---------------------------------------------------------
+
+    def exp_flag_in_strings(self, binary: Path) -> dict:
+        """Cherche un flag directement dans les strings du binaire."""
+        exp = {
+            "id": f"flag_strings_{binary.name}",
+            "hypothesis": "Flag present in binary",
+            "category": "pwn",
+            "type": "flag_strings",
+            "status": "RUNNING",
+            "binary": str(binary),
             "observations": [],
+            "flag_found": None,
             "validated": False,
-            "timestamp": time.time(),
         }
 
-    def observe_files(self):
-        """
-        Observation passive du challenge.
-        Aucun exploit n'est lancé ici.
-        """
+        try:
+            proc = subprocess.run(
+                ["strings", "-a", "-n", "4", str(binary)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            output = proc.stdout or ""
+            flag = self._search_flag(output)
+            exp["stdout"] = output[:2000]
+            if flag:
+                exp["flag_found"] = flag
+                exp["validated"] = True
+                exp["status"] = "VALIDATED"
+                exp["observations"].append(f"Flag found in strings: {flag}")
+            else:
+                exp["status"] = "INCONCLUSIVE"
+                exp["observations"].append("No flag pattern in strings")
+        except Exception as exc:
+            exp["status"] = "ERROR"
+            exp["observations"].append(str(exc))
 
-        root = Path(self.challenge)
+        return exp
 
-        observations = {
-            "challenge_exists": root.exists(),
-            "files": [],
-            "javascript_files": [],
-            "html_files": [],
+    def exp_run_with_inputs(self, binary: Path) -> dict:
+        """Lance le binaire avec plusieurs inputs et cherche un flag / crash."""
+        exp = {
+            "id": f"run_inputs_{binary.name}",
+            "hypothesis": "Reach Win Function / Memory Corruption",
+            "category": "pwn",
+            "type": "run_inputs",
+            "status": "RUNNING",
+            "binary": str(binary),
+            "observations": [],
+            "flag_found": None,
+            "validated": False,
+            "runs": [],
         }
 
-        if not root.exists():
-            return observations
+        payloads = [
+            b"test\n",
+            b"A" * 80 + b"\n",
+            b"A" * 200 + b"\n",
+            b"%x%x%x%x\n",
+        ]
 
-        for path in root.rglob("*"):
-
-            if not path.is_file():
-                continue
-
-            if any(
-                part in {
-                    ".git",
-                    "node_modules",
-                    "__pycache__",
-                    ".venv",
-                }
-                for part in path.parts
-            ):
-                continue
-
-            path_str = str(path)
-
-            observations["files"].append(path_str)
-
-            if path.suffix.lower() == ".js":
-                observations["javascript_files"].append(
-                    path_str
-                )
-
-            if path.suffix.lower() in {
-                ".html",
-                ".htm",
-            }:
-                observations["html_files"].append(
-                    path_str
-                )
-
-        return observations
-
-    def inspect_hypothesis(self, hypothesis):
-        """
-        Première validation expérimentale.
-
-        Cette phase cherche des preuves concrètes
-        dans le challenge mais ne prétend pas encore
-        avoir exécuté un exploit.
-        """
-
-        name = hypothesis.get(
-            "name",
-            "",
-        ).lower()
-
-        observations = []
-        evidence = []
-
-        files = self.observe_files()
-
-        observations.append({
-            "type": "filesystem",
-            "value": {
-                "files": len(files["files"]),
-                "javascript": len(
-                    files["javascript_files"]
-                ),
-                "html": len(
-                    files["html_files"]
-                ),
-            },
-        })
-
-        # --------------------------------------------------
-        # Stored XSS / Admin Bot
-        # --------------------------------------------------
-
-        if (
-            "stored xss" in name
-            or "admin bot" in name
-        ):
-
-            keywords = [
-                "raw(",
-                "decodehtml",
-                "issuspicious",
-                "visitlatestposts",
-                "admin/preview",
-            ]
-
-            matches = self.search_source(
-                keywords
-            )
-
-            if matches:
-                evidence.extend(matches)
-
-        # --------------------------------------------------
-        # DOM property manipulation
-        # --------------------------------------------------
-
-        if (
-            "dom property" in name
-            or "dom-controlled" in name
-            or "navigation" in name
-        ):
-
-            keywords = [
-                "window.whatsnew",
-                "getattribute",
-                ".href",
-                "new url",
-                "location.assign",
-            ]
-
-            matches = self.search_source(
-                keywords
-            )
-
-            if matches:
-                evidence.extend(matches)
-
-        # --------------------------------------------------
-        # Détermination du résultat
-        # --------------------------------------------------
-
-        if evidence:
-
-            status = "OBSERVED"
-
-            observations.append({
-                "type": "source_evidence",
-                "count": len(evidence),
+        for payload in payloads:
+            result = self._run_binary(binary, payload)
+            exp["runs"].append({
+                "input_len": len(payload),
+                "returncode": result.get("returncode"),
+                "crashed": result.get("crashed"),
+                "stdout": result.get("stdout", "")[:500],
+                "stderr": result.get("stderr", "")[:300],
             })
 
-            observations.extend(evidence)
+            combined = (result.get("stdout") or "") + "\n" + (result.get("stderr") or "")
+            flag = self._search_flag(combined)
+            if flag:
+                exp["flag_found"] = flag
+                exp["validated"] = True
+                exp["status"] = "VALIDATED"
+                exp["observations"].append(f"Flag found in process output: {flag}")
+                break
 
-        else:
+            if result.get("crashed"):
+                exp["observations"].append(
+                    f"Crash detected with input length {len(payload)}"
+                )
 
-            status = "NO_EVIDENCE"
+        if exp["status"] == "RUNNING":
+            if any("Crash detected" in o for o in exp["observations"]):
+                exp["status"] = "INCONCLUSIVE"
+                exp["observations"].append("Crash observed but no flag recovered")
+            else:
+                exp["status"] = "INCONCLUSIVE"
+                exp["observations"].append("No flag and no clear crash")
 
-        return {
-            "status": status,
-            "observations": observations,
-            "evidence": evidence,
-        }
+        return exp
 
-    def search_source(self, keywords):
-        """
-        Recherche de preuves textuelles dans les sources.
-        """
+    # ---------------------------------------------------------
+    # Boucle principale
+    # ---------------------------------------------------------
+
+    def run(self) -> list[dict]:
+        print()
+        print("╔══════════════════════════════════════════╗")
+        print("║          EXPERIMENT ENGINE v0.3          ║")
+        print("╚══════════════════════════════════════════╝")
+        print()
+
+        binaries = self._find_binaries()
+        if not binaries:
+            print("[-] Aucun binaire trouvé pour expérimentation.")
+            return []
+
+        print(f"[+] Binaires à tester : {len(binaries)}")
+        for b in binaries:
+            print(f"    • {b}")
+        print()
 
         results = []
 
-        root = Path(self.challenge)
+        for binary in binaries:
+            # Expérience 1 : flag dans les strings
+            print(f"[*] Experiment: flag_strings on {binary.name}")
+            exp1 = self.exp_flag_in_strings(binary)
+            results.append(exp1)
+            self._print_exp(exp1)
 
-        if not root.exists():
-            return results
+            if exp1.get("validated") and exp1.get("flag_found"):
+                self.context.flags.append(exp1["flag_found"])
+                break
 
-        for path in root.rglob("*"):
+            # Expérience 2 : exécution avec inputs
+            print(f"[*] Experiment: run_inputs on {binary.name}")
+            exp2 = self.exp_run_with_inputs(binary)
+            results.append(exp2)
+            self._print_exp(exp2)
 
-            if not path.is_file():
-                continue
+            if exp2.get("validated") and exp2.get("flag_found"):
+                self.context.flags.append(exp2["flag_found"])
+                break
 
-            if any(
-                part in {
-                    ".git",
-                    "node_modules",
-                    "__pycache__",
-                    ".venv",
-                }
-                for part in path.parts
-            ):
-                continue
-
-            if path.suffix.lower() not in {
-                ".js",
-                ".html",
-                ".py",
-                ".json",
-                ".c",
-                ".cpp",
-                ".h",
-            }:
-                continue
-
-            try:
-                content = path.read_text(
-                    encoding="utf-8",
-                    errors="ignore",
-                )
-            except Exception:
-                continue
-
-            lower = content.lower()
-
-            for keyword in keywords:
-
-                if keyword.lower() not in lower:
-                    continue
-
-                # trouver la première occurrence
-                index = lower.find(
-                    keyword.lower()
-                )
-
-                line = (
-                    content[:index]
-                    .count("\n")
-                    + 1
-                )
-
-                results.append({
-                    "type": "keyword",
-                    "keyword": keyword,
-                    "file": str(path),
-                    "line": line,
-                })
-
+        self.experiments = results
+        self.context.experiments = results
         return results
 
-    def run(self, hypotheses):
-        """
-        Exécute les expériences dans l'ordre
-        de confiance décroissante.
-        """
-
-        if not isinstance(
-            hypotheses,
-            list,
-        ):
-            hypotheses = []
-
-        hypotheses = sorted(
-            hypotheses,
-            key=lambda x: x.get(
-                "confidence",
-                0,
-            ),
-            reverse=True,
-        )
-
-        for hypothesis in hypotheses:
-
-            experiment = self.make_experiment(
-                hypothesis
-            )
-
-            experiment["status"] = "RUNNING"
-
-            result = self.inspect_hypothesis(
-                hypothesis
-            )
-
-            experiment["observations"] = (
-                result["observations"]
-            )
-
-            experiment["evidence"] = (
-                result["evidence"]
-            )
-
-            # IMPORTANT :
-            # OBSERVED != VALIDATED.
-            #
-            # Nous avons seulement trouvé
-            # des preuves statiques.
-            #
-            # La validation réelle viendra
-            # après exécution contrôlée.
-
-            if result["status"] == "OBSERVED":
-
-                experiment["status"] = (
-                    "EVIDENCE_FOUND"
-                )
-
-                experiment["validated"] = False
-
-            else:
-
-                experiment["status"] = (
-                    "REJECTED"
-                )
-
-                experiment["validated"] = False
-
-            self.results.append(
-                experiment
-            )
-
-        return self.results
-
-
-def load_context(challenge):
-    path = (
-        Path(challenge)
-        / ".cyberai"
-        / "context.json"
-    )
-
-    if not path.exists():
-        raise FileNotFoundError(
-            f"context.json introuvable : {path}"
-        )
-
-    with open(
-        path,
-        "r",
-        encoding="utf-8",
-    ) as f:
-        return json.load(f)
-
-
-def save_context(challenge, context):
-    path = (
-        Path(challenge)
-        / ".cyberai"
-        / "context.json"
-    )
-
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    with open(
-        path,
-        "w",
-        encoding="utf-8",
-    ) as f:
-        json.dump(
-            context,
-            f,
-            indent=2,
-            ensure_ascii=False,
-        )
-
-
-def main():
-
-    import sys
-
-    if len(sys.argv) != 2:
-
-        print(
-            "Usage: python agent/experiment_engine.py "
-            "<challenge>"
-        )
-
-        raise SystemExit(1)
-
-    challenge = os.path.abspath(
-        sys.argv[1]
-    )
-
-    context = load_context(
-        challenge
-    )
-
-    hypotheses = context.get(
-        "hypotheses",
-        [],
-    )
-
-    engine = ExperimentEngine(
-        challenge
-    )
-
-    experiments = engine.run(
-        hypotheses
-    )
-
-    context["experiments"] = experiments
-
-    save_context(
-        challenge,
-        context,
-    )
-
-    print()
-    print("=" * 70)
-    print("🧪 CYBERAI — EXPERIMENT ENGINE")
-    print("=" * 70)
-
-    print(
-        f"\nHypothèses : {len(hypotheses)}"
-    )
-
-    print(
-        f"Expériences : {len(experiments)}"
-    )
-
-    for experiment in experiments:
-
+    def _print_exp(self, exp: dict):
+        status = exp.get("status")
+        flag = exp.get("flag_found")
+        print(f"    → status: {status}")
+        if flag:
+            print(f"    → FLAG: {flag}")
+        for obs in exp.get("observations", []):
+            print(f"    → {obs}")
         print()
-        print(
-            f"[{experiment['id']}] "
-            f"{experiment['hypothesis']}"
-        )
-
-        print(
-            f"  Status : "
-            f"{experiment['status']}"
-        )
-
-        print(
-            f"  Validated : "
-            f"{experiment['validated']}"
-        )
-
-        print(
-            f"  Evidence : "
-            f"{len(experiment.get('evidence', []))}"
-        )
-
-    print()
-    print(
-        "⚠️ EVIDENCE_FOUND ne signifie PAS "
-        "EXPLOIT VALIDÉ."
-    )
-
-    print(
-        f"\n[+] Context sauvegardé : "
-        f"{Path(challenge) / '.cyberai' / 'context.json'}"
-    )
 
 
-if __name__ == "__main__":
-    main()
+def analyze(challenge=None, context=None):
+    """
+    Point d'entrée optionnel.
+    Dans l'orchestrateur on appellera plutôt ExperimentEngine(context).run()
+    """
+    if context is None:
+        return {"status": "ERROR", "error": "context required"}
+    engine = ExperimentEngine(context)
+    return engine.run()
+
